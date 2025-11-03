@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"strings"
 	"testing"
 	"text/template"
 
@@ -40,25 +41,10 @@ func TestParser(t *testing.T) {
 			Function: api.ToolFunction{
 				Name:        "get_temperature",
 				Description: "Retrieve the temperature for a given location",
-				Parameters: struct {
-					Type       string   `json:"type"`
-					Defs       any      `json:"$defs,omitempty"`
-					Items      any      `json:"items,omitempty"`
-					Required   []string `json:"required"`
-					Properties map[string]struct {
-						Type        api.PropertyType `json:"type"`
-						Items       any              `json:"items,omitempty"`
-						Description string           `json:"description"`
-						Enum        []any            `json:"enum,omitempty"`
-					} `json:"properties"`
-				}{
-					Type: "object",
-					Properties: map[string]struct {
-						Type        api.PropertyType `json:"type"`
-						Items       any              `json:"items,omitempty"`
-						Description string           `json:"description"`
-						Enum        []any            `json:"enum,omitempty"`
-					}{
+				Parameters: api.ToolFunctionParameters{
+					Type:     "object",
+					Required: []string{"city"},
+					Properties: map[string]api.ToolProperty{
 						"format": {
 							Type:        api.PropertyType{"string"},
 							Description: "The format to return the temperature in",
@@ -77,28 +63,62 @@ func TestParser(t *testing.T) {
 			Function: api.ToolFunction{
 				Name:        "get_conditions",
 				Description: "Retrieve the current weather conditions for a given location",
-				Parameters: struct {
-					Type       string   `json:"type"`
-					Defs       any      `json:"$defs,omitempty"`
-					Items      any      `json:"items,omitempty"`
-					Required   []string `json:"required"`
-					Properties map[string]struct {
-						Type        api.PropertyType `json:"type"`
-						Items       any              `json:"items,omitempty"`
-						Description string           `json:"description"`
-						Enum        []any            `json:"enum,omitempty"`
-					} `json:"properties"`
-				}{
+				Parameters: api.ToolFunctionParameters{
 					Type: "object",
-					Properties: map[string]struct {
-						Type        api.PropertyType `json:"type"`
-						Items       any              `json:"items,omitempty"`
-						Description string           `json:"description"`
-						Enum        []any            `json:"enum,omitempty"`
-					}{
+					Properties: map[string]api.ToolProperty{
 						"location": {
 							Type:        api.PropertyType{"string"},
 							Description: "The location to get the weather conditions for",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name:        "say_hello",
+				Description: "Say hello",
+			},
+		},
+		{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name:        "say_hello_world",
+				Description: "Say hello world",
+			},
+		},
+		{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name:        "get_address",
+				Description: "Get the address of a given location",
+				Parameters: api.ToolFunctionParameters{
+					Type: "object",
+					Properties: map[string]api.ToolProperty{
+						"location": {
+							Type:        api.PropertyType{"string"},
+							Description: "The location to get the address for",
+						},
+					},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: api.ToolFunction{
+				Name:        "add",
+				Description: "Add two numbers",
+				Parameters: api.ToolFunctionParameters{
+					Type: "object",
+					Properties: map[string]api.ToolProperty{
+						"a": {
+							Type:        api.PropertyType{"string"},
+							Description: "The first number to add",
+						},
+						"b": {
+							Type:        api.PropertyType{"string"},
+							Description: "The second number to add",
 						},
 					},
 				},
@@ -145,6 +165,21 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
+			name:    "empty args",
+			inputs:  []string{`<tool_call>{"name": "get_conditions", "arguments": {}}</tool_call>`},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "get_conditions",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+			},
+		},
+		{
 			name:    "text before tool call",
 			inputs:  []string{`Let me check the weather. <tool_call>{"name": "get_temperature", "arguments": {"city": "New York"}}</tool_call>`},
 			content: "Let me check the weather. ",
@@ -160,6 +195,13 @@ func TestParser(t *testing.T) {
 					},
 				},
 			},
+		},
+		{
+			name:    "qwen no args with text",
+			inputs:  []string{"Let me say hello to the user. I'll use the say_hello tool. "},
+			content: "Let me say hello to the user. I'll use the say_hello tool. ",
+			tmpl:    qwen,
+			calls:   nil,
 		},
 		{
 			name:    "two tool calls in a list",
@@ -189,7 +231,7 @@ func TestParser(t *testing.T) {
 			},
 		},
 		{
-			name:    "two tool calls",
+			name:    "qwen two tool calls",
 			inputs:  []string{`Okay, let's call both tools! <tool_call>{"name": "get_temperature", "arguments": {"city": "London", "format": "fahrenheit"}}</tool_call><tool_call>{"name": "get_conditions", "arguments": {"location": "Tokyo"}}</tool_call>`},
 			content: "Okay, let's call both tools! ",
 			tmpl:    qwen,
@@ -202,6 +244,55 @@ func TestParser(t *testing.T) {
 							"city":   "London",
 							"format": "fahrenheit",
 						},
+					},
+				},
+				{
+					Function: api.ToolCallFunction{
+						Index: 1,
+						Name:  "get_conditions",
+						Arguments: api.ToolCallFunctionArguments{
+							"location": "Tokyo",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:    "empty args followed by args",
+			inputs:  []string{`Let me say hello and check the weather. <tool_call>{"name": "say_hello", "arguments": {}}</tool_call><tool_call>{"name": "get_temperature", "arguments": {"city": "London", "format": "fahrenheit"}}</tool_call>`},
+			content: "Let me say hello and check the weather. ",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "say_hello",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+				{
+					Function: api.ToolCallFunction{
+						Index: 1,
+						Name:  "get_temperature",
+						Arguments: api.ToolCallFunctionArguments{
+							"city":   "London",
+							"format": "fahrenheit",
+						},
+					},
+				},
+			},
+		},
+		{
+			name:    "qwen empty followed by args",
+			inputs:  []string{`Let me check the weather. <tool_call>{"name": "get_conditions", "arguments": {}}</tool_call><tool_call>{"name": "get_conditions", "arguments": {"location": "Tokyo"}}`},
+			content: "Let me check the weather. ",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "get_conditions",
+						Arguments: api.ToolCallFunctionArguments{},
 					},
 				},
 				{
@@ -381,6 +472,30 @@ func TestParser(t *testing.T) {
 		{
 			name: "list partial",
 			inputs: []string{
+				"[{",
+				"\"name\": \"get_conditions\", ",
+				"\"arguments\": {",
+				"\"location\": \"Tokyo\"",
+				"}",
+				"}",
+			},
+			content: "",
+			tmpl:    list,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index: 0,
+						Name:  "get_conditions",
+						Arguments: api.ToolCallFunctionArguments{
+							"location": "Tokyo",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "list invalid",
+			inputs: []string{
 				"[",
 				"{",
 				"\"name\": \"search\", ",
@@ -394,6 +509,33 @@ func TestParser(t *testing.T) {
 			calls:   nil,
 		},
 		{
+			name: "list trailing ]",
+			inputs: []string{
+				"[",
+				"{",
+				"\"name\": \"get_conditions\", ",
+				"\"arguments\": {",
+				"\"location\": \"Tokyo\"",
+				"}",
+				"}",
+				"]",
+				"]",
+			},
+			content: "",
+			tmpl:    list,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index: 0,
+						Name:  "get_conditions",
+						Arguments: api.ToolCallFunctionArguments{
+							"location": "Tokyo",
+						},
+					},
+				},
+			},
+		},
+		{
 			name: "list not a tool call",
 			inputs: []string{
 				"[special",
@@ -403,6 +545,193 @@ func TestParser(t *testing.T) {
 			content: "[special delivery]",
 			tmpl:    list,
 			calls:   nil,
+		},
+		{
+			name: "tool name with collision",
+			inputs: []string{
+				"<tool_call>",
+				"{",
+				"\"name\": \"say_hello",
+				"_world\",",
+				"\"arguments\": {}}",
+				"}",
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "say_hello_world",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+			},
+		},
+		{
+			name: "tool name with collision multiple",
+			inputs: []string{
+				"<tool_call>",
+				"{",
+				"\"name\": \"say_hello",
+				"_world\",",
+				"\"arguments\": {}}",
+				"</tool_call>",
+				"<tool_call>",
+				"{",
+				"\"name\": \"say_hello",
+				"\",",
+				"\"arguments\": {}}",
+				"</tool_call>",
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "say_hello_world",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+				{
+					Function: api.ToolCallFunction{
+						Index:     1,
+						Name:      "say_hello",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+			},
+		},
+		{
+			name: "tool name with collision non streaming",
+			inputs: []string{
+				`<tool_call>{"name": "say_hello`,
+			},
+			content: "",
+			tmpl:    qwen,
+			calls:   nil,
+		},
+		{
+			name: "tool name with collision non streaming multiple",
+			inputs: []string{
+				`<tool_call>{"name": "say_hello", "arguments": {}}</tool_call><tool_call>{"name": "say_hello_world", "arguments": {}}`,
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "say_hello",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+				{
+					Function: api.ToolCallFunction{
+						Index:     1,
+						Name:      "say_hello_world",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+			},
+		},
+		{
+			name: "tool name with collision non streaming shorter",
+			inputs: []string{
+				`<tool_call>{"name": "say_hello", "arguments": {}}</tool_call>`,
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "say_hello",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+			},
+		},
+		{
+			name: "tool name with collision non streaming longer",
+			inputs: []string{
+				`<tool_call>{"name": "say_hello_world", "arguments": {}}</tool_call>`,
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index:     0,
+						Name:      "say_hello_world",
+						Arguments: api.ToolCallFunctionArguments{},
+					},
+				},
+			},
+		},
+		{
+			name: "tool name with substring of another",
+			inputs: []string{
+				"{",
+				"\"name\": \"get_address\",",
+				"\"arguments\": {",
+				"\"location\": \"London\"",
+				"}",
+				"}",
+			},
+			content: "",
+			tmpl:    json,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index: 0,
+						Name:  "get_address",
+						Arguments: api.ToolCallFunctionArguments{
+							"location": "London",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "tool name with substring of another",
+			inputs: []string{
+				`<tool_call>{"name": "get_address", "arguments": {"location": "London"}}</tool_call>`,
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index: 0,
+						Name:  "get_address",
+						Arguments: api.ToolCallFunctionArguments{
+							"location": "London",
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "args before name",
+			inputs: []string{
+				`<tool_call>{"arguments": {"a": "5", "b": "10"}, "name": "add"}</tool_call>`,
+			},
+			content: "",
+			tmpl:    qwen,
+			calls: []api.ToolCall{
+				{
+					Function: api.ToolCallFunction{
+						Index: 0,
+						Name:  "add",
+						Arguments: api.ToolCallFunctionArguments{
+							"a": "5",
+							"b": "10",
+						},
+					},
+				},
+			},
 		},
 	}
 
@@ -704,6 +1033,7 @@ func TestFindArguments(t *testing.T) {
 		name   string
 		buffer []byte
 		want   map[string]any
+		tool   string
 	}{
 		{
 			name:   "empty string",
@@ -750,7 +1080,7 @@ func TestFindArguments(t *testing.T) {
 		},
 		{
 			name:   "valid arguments in array",
-			buffer: []byte(`[{"arguments": {"format": "fahrenheit", "location": "San Francisco, CA"}}`),
+			buffer: []byte(`[{"name": "get_temperature", "arguments": {"format": "fahrenheit", "location": "San Francisco, CA"}}`),
 			want: map[string]any{
 				"format":   "fahrenheit",
 				"location": "San Francisco, CA",
@@ -766,14 +1096,14 @@ func TestFindArguments(t *testing.T) {
 		},
 		{
 			name:   "one arg",
-			buffer: []byte(`get_weather({"location": "San Francisco, CA"})`),
+			buffer: []byte(`get_temperature({"location": "San Francisco, CA"})`),
 			want: map[string]any{
 				"location": "San Francisco, CA",
 			},
 		},
 		{
 			name:   "two args",
-			buffer: []byte(`[{"name": "get_weather", "arguments": {"location": "San Francisco, CA", "format": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "format": "fahrenheit"}}]`),
+			buffer: []byte(`[{"name": "get_temperature", "arguments": {"location": "San Francisco, CA", "format": "fahrenheit"}}, {"name": "get_weather", "arguments": {"location": "San Francisco, CA", "format": "fahrenheit"}}]`),
 			want: map[string]any{
 				"location": "San Francisco, CA",
 				"format":   "fahrenheit",
@@ -781,21 +1111,209 @@ func TestFindArguments(t *testing.T) {
 		},
 		{
 			name:   "deepseek",
-			buffer: []byte("<|tool▁calls▁begin|><|tool▁call▁begin|>function<|tool▁sep|>get_current_weather\n```json\n{\"location\": \"Tokyo\"}\n```<|tool▁call▁end|><|tool▁calls▁end|><|end▁of▁sentence|>"),
+			buffer: []byte("<|tool▁calls▁begin|><|tool▁call▁begin|>function<|tool▁sep|>get_temperature\n```json\n{\"location\": \"Tokyo\"}\n```<|tool▁call▁end|><|tool▁calls▁end|><|end▁of▁sentence|>"),
 			want: map[string]any{
 				"location": "Tokyo",
+			},
+		},
+		{
+			name:   "deepseek",
+			buffer: []byte(`"arguments": {"location": "Tokyo"}}</tool_call>`),
+			want: map[string]any{
+				"location": "Tokyo",
+			},
+		},
+		{
+			name:   "string with braces",
+			buffer: []byte(`{"name": "process_code", "arguments": {"code": "if (x > 0) { return true; }"}}`),
+			want: map[string]any{
+				"code": "if (x > 0) { return true; }",
+			},
+		},
+		{
+			name:   "string with nested json",
+			buffer: []byte(`{"name": "send_data", "arguments": {"payload": "{\"nested\": {\"key\": \"value\"}}"}}`),
+			want: map[string]any{
+				"payload": `{"nested": {"key": "value"}}`,
+			},
+		},
+		{
+			name:   "string with escaped quotes and braces",
+			buffer: []byte(`{"name": "analyze", "arguments": {"text": "The JSON is: {\"key\": \"val{ue}\"}"}}`),
+			want: map[string]any{
+				"text": `The JSON is: {"key": "val{ue}"}`,
+			},
+		},
+		{
+			name:   "multiple objects with string containing braces",
+			buffer: []byte(`{"name": "test", "arguments": {"query": "find } in text"}} {"name": "other"}`),
+			want: map[string]any{
+				"query": "find } in text",
+			},
+		},
+		{
+			name:   "unmatched closing brace in string",
+			buffer: []byte(`{"name": "search", "arguments": {"pattern": "regex: }"}}`),
+			want: map[string]any{
+				"pattern": "regex: }",
+			},
+		},
+		{
+			name:   "complex nested with mixed braces",
+			buffer: []byte(`{"name": "analyze", "arguments": {"data": "{\"items\": [{\"value\": \"}\"}, {\"code\": \"if (x) { return y; }\"}]}"}}`),
+			want: map[string]any{
+				"data": `{"items": [{"value": "}"}, {"code": "if (x) { return y; }"}]}`,
+			},
+		},
+		{
+			name:   "string with newline and braces",
+			buffer: []byte(`{"name": "format", "arguments": {"template": "{\n  \"key\": \"value\"\n}"}}`),
+			want: map[string]any{
+				"template": "{\n  \"key\": \"value\"\n}",
+			},
+		},
+		{
+			name:   "string with unicode escape",
+			buffer: []byte(`{"name": "test", "arguments": {"text": "Unicode: \u007B and \u007D"}}`),
+			want: map[string]any{
+				"text": "Unicode: { and }",
+			},
+		},
+		{
+			name:   "array arguments",
+			buffer: []byte(`{"name": "batch", "arguments": ["item1", "item2", "{\"nested\": true}"]}`),
+			want:   nil, // This should return nil because arguments is not a map
+		},
+		{
+			name:   "escaped backslash before quote",
+			buffer: []byte(`{"name": "path", "arguments": {"dir": "C:\\Program Files\\{App}\\"}}`),
+			want: map[string]any{
+				"dir": `C:\Program Files\{App}\`,
+			},
+		},
+		{
+			name:   "single quotes not treated as string delimiters",
+			buffer: []byte(`{"name": "query", "arguments": {"sql": "SELECT * FROM users WHERE name = '{admin}'"}}`),
+			want: map[string]any{
+				"sql": "SELECT * FROM users WHERE name = '{admin}'",
+			},
+		},
+		{
+			name:   "incomplete json at buffer end",
+			buffer: []byte(`{"name": "test", "arguments": {"data": "some {"`),
+			want:   nil,
+		},
+		{
+			name:   "multiple escaped quotes",
+			buffer: []byte(`{"name": "echo", "arguments": {"msg": "He said \"Hello {World}\" loudly"}}`),
+			want: map[string]any{
+				"msg": `He said "Hello {World}" loudly`,
+			},
+		},
+		{
+			name:   "json with comments style string",
+			buffer: []byte(`{"name": "code", "arguments": {"snippet": "// This is a comment with { and }"}}`),
+			want: map[string]any{
+				"snippet": "// This is a comment with { and }",
+			},
+		},
+		{
+			name:   "consecutive escaped backslashes",
+			buffer: []byte(`{"name": "test", "arguments": {"path": "C:\\\\{folder}\\\\"}}`),
+			want: map[string]any{
+				"path": `C:\\{folder}\\`,
+			},
+		},
+		{
+			name:   "empty string with braces after",
+			buffer: []byte(`{"name": "test", "arguments": {"a": "", "b": "{value}"}}`),
+			want: map[string]any{
+				"a": "",
+				"b": "{value}",
+			},
+		},
+		{
+			name:   "unicode in key names",
+			buffer: []byte(`{"name": "test", "arguments": {"key{": "value", "key}": "value2"}}`),
+			want: map[string]any{
+				"key{": "value",
+				"key}": "value2",
+			},
+		},
+		{
+			name:   "very long string with braces",
+			buffer: []byte(`{"name": "test", "arguments": {"data": "` + strings.Repeat("a{b}c", 100) + `"}}`),
+			want: map[string]any{
+				"data": strings.Repeat("a{b}c", 100),
+			},
+		},
+		{
+			name:   "tab characters and braces",
+			buffer: []byte(`{"name": "test", "arguments": {"code": "\tif (true) {\n\t\treturn;\n\t}"}}`),
+			want: map[string]any{
+				"code": "\tif (true) {\n\t\treturn;\n\t}",
+			},
+		},
+		{
+			name:   "null byte in string",
+			buffer: []byte(`{"name": "test", "arguments": {"data": "before\u0000{after}"}}`),
+			want: map[string]any{
+				"data": "before\x00{after}",
+			},
+		},
+		{
+			name:   "escaped quote at end of string",
+			buffer: []byte(`{"name": "test", "arguments": {"data": "text with quote at end\\\""}}`),
+			want: map[string]any{
+				"data": `text with quote at end\"`,
+			},
+		},
+		{
+			name:   "mixed array and object in arguments",
+			buffer: []byte(`{"name": "test", "arguments": {"items": ["{", "}", {"key": "value"}]}}`),
+			want: map[string]any{
+				"items": []any{"{", "}", map[string]any{"key": "value"}},
+			},
+		},
+		{
+			name:   "stringified arguments",
+			buffer: []byte(`{"name": "get_temperature", "arguments": "{\"format\": \"fahrenheit\", \"location\": \"San Francisco, CA\"}"}`),
+			want: map[string]any{
+				"format":   "fahrenheit",
+				"location": "San Francisco, CA",
+			},
+		},
+		{
+			name:   "stringified parameters",
+			buffer: []byte(`{"name": "get_temperature", "parameters": "{\"format\": \"fahrenheit\", \"location\": \"San Francisco, CA\"}"}`),
+			want: map[string]any{
+				"format":   "fahrenheit",
+				"location": "San Francisco, CA",
+			},
+		},
+		{
+			name:   "simple tool call",
+			tool:   "get_temperature",
+			buffer: []byte(`{"get_temperature": {"format": "fahrenheit", "location": "San Francisco, CA"}}`),
+			want: map[string]any{
+				"format":   "fahrenheit",
+				"location": "San Francisco, CA",
+			},
+		},
+		{
+			name:   "stringified simple tool call",
+			tool:   "get_temperature",
+			buffer: []byte(`{"get_temperature": "{\"format\": \"fahrenheit\", \"location\": \"San Francisco, CA\"}"}`),
+			want: map[string]any{
+				"format":   "fahrenheit",
+				"location": "San Francisco, CA",
 			},
 		},
 	}
 
 	for _, tt := range tests {
-		parser := &Parser{
-			buffer:     tt.buffer,
-			properties: []string{"format", "location"},
-		}
-
 		t.Run(tt.name, func(t *testing.T) {
-			got, _ := parser.findArguments()
+			got, _ := findArguments(&api.Tool{Function: api.ToolFunction{Name: tt.tool}}, tt.buffer)
 
 			if diff := cmp.Diff(got, tt.want); diff != "" {
 				t.Errorf("scanArguments() args mismatch (-got +want):\n%s", diff)
