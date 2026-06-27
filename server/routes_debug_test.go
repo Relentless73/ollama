@@ -15,6 +15,7 @@ import (
 )
 
 func TestGenerateDebugRenderOnly(t *testing.T) {
+	t.Setenv("OLLAMA_CONTEXT_LENGTH", "4096")
 	gin.SetMode(gin.TestMode)
 
 	mock := mockRunner{
@@ -39,7 +40,7 @@ func TestGenerateDebugRenderOnly(t *testing.T) {
 			getGpuFn:        getGpuFn,
 			getSystemInfoFn: getSystemInfoFn,
 			waitForRecovery: 250 * time.Millisecond,
-			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ ml.SystemInfo, _ []ml.DeviceInfo, _ bool) bool {
+			loadFn: func(req *LlmRequest, _ ml.SystemInfo, _ []ml.DeviceInfo, _ bool) bool {
 				// add small delay to simulate loading
 				time.Sleep(time.Millisecond)
 				req.successCh <- &runnerRef{
@@ -208,6 +209,8 @@ func TestGenerateDebugRenderOnly(t *testing.T) {
 }
 
 func TestChatDebugRenderOnly(t *testing.T) {
+	t.Setenv("OLLAMA_CONTEXT_LENGTH", "4096")
+	t.Setenv("OLLAMA_GO_TEMPLATE", "1")
 	gin.SetMode(gin.TestMode)
 
 	mock := mockRunner{
@@ -232,7 +235,7 @@ func TestChatDebugRenderOnly(t *testing.T) {
 			getGpuFn:        getGpuFn,
 			getSystemInfoFn: getSystemInfoFn,
 			waitForRecovery: 250 * time.Millisecond,
-			loadFn: func(req *LlmRequest, _ *ggml.GGML, _ ml.SystemInfo, _ []ml.DeviceInfo, _ bool) bool {
+			loadFn: func(req *LlmRequest, _ ml.SystemInfo, _ []ml.DeviceInfo, _ bool) bool {
 				// add small delay to simulate loading
 				time.Sleep(time.Millisecond)
 				req.successCh <- &runnerRef{
@@ -363,7 +366,7 @@ func TestChatDebugRenderOnly(t *testing.T) {
 				DebugRenderOnly: true,
 			},
 			expectDebug:    true,
-			expectTemplate: "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get weather information\",\"parameters\":{\"type\":\"\",\"required\":null,\"properties\":null}}}]user: Get the weather\n",
+			expectTemplate: "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Get weather information\",\"parameters\":{\"type\":\"\",\"properties\":null}}}]user: Get the weather\n",
 		},
 	}
 

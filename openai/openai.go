@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand"
 	"net/http"
 	"slices"
 	"strings"
@@ -41,22 +40,29 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 }
 
+type ChoiceLogprobs struct {
+	Content []api.Logprob `json:"content"`
+}
+
 type Choice struct {
-	Index        int     `json:"index"`
-	Message      Message `json:"message"`
-	FinishReason *string `json:"finish_reason"`
+	Index        int             `json:"index"`
+	Message      Message         `json:"message"`
+	FinishReason *string         `json:"finish_reason"`
+	Logprobs     *ChoiceLogprobs `json:"logprobs,omitempty"`
 }
 
 type ChunkChoice struct {
-	Index        int     `json:"index"`
-	Delta        Message `json:"delta"`
-	FinishReason *string `json:"finish_reason"`
+	Index        int             `json:"index"`
+	Delta        Message         `json:"delta"`
+	FinishReason *string         `json:"finish_reason"`
+	Logprobs     *ChoiceLogprobs `json:"logprobs,omitempty"`
 }
 
 type CompleteChunkChoice struct {
-	Text         string  `json:"text"`
-	Index        int     `json:"index"`
-	FinishReason *string `json:"finish_reason"`
+	Text         string          `json:"text"`
+	Index        int             `json:"index"`
+	FinishReason *string         `json:"finish_reason"`
+	Logprobs     *ChoiceLogprobs `json:"logprobs,omitempty"`
 }
 
 type Usage struct {
@@ -105,6 +111,8 @@ type ChatCompletionRequest struct {
 	Tools            []api.Tool      `json:"tools"`
 	Reasoning        *Reasoning      `json:"reasoning,omitempty"`
 	ReasoningEffort  *string         `json:"reasoning_effort,omitempty"`
+	Logprobs         *bool           `json:"logprobs"`
+	TopLogprobs      int             `json:"top_logprobs"`
 	DebugRenderOnly  bool            `json:"_debug_render_only"`
 }
 
@@ -143,6 +151,7 @@ type CompletionRequest struct {
 	Temperature      *float32       `json:"temperature"`
 	TopP             float32        `json:"top_p"`
 	Suffix           string         `json:"suffix"`
+	Logprobs         *int           `json:"logprobs"`
 	DebugRenderOnly  bool           `json:"_debug_render_only"`
 }
 
@@ -229,20 +238,11 @@ func ToUsage(r api.ChatResponse) Usage {
 	}
 }
 
-func toolCallId() string {
-	const letterBytes = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, 8)
-	for i := range b {
-		b[i] = letterBytes[rand.Intn(len(letterBytes))]
-	}
-	return "call_" + strings.ToLower(string(b))
-}
-
 // ToToolCalls converts api.ToolCall to OpenAI ToolCall format
 func ToToolCalls(tc []api.ToolCall) []ToolCall {
 	toolCalls := make([]ToolCall, len(tc))
 	for i, tc := range tc {
-		toolCalls[i].ID = toolCallId()
+		toolCalls[i].ID = tc.ID
 		toolCalls[i].Type = "function"
 		toolCalls[i].Function.Name = tc.Function.Name
 		toolCalls[i].Index = tc.Function.Index
@@ -261,6 +261,12 @@ func ToToolCalls(tc []api.ToolCall) []ToolCall {
 // ToChatCompletion converts an api.ChatResponse to ChatCompletion
 func ToChatCompletion(id string, r api.ChatResponse) ChatCompletion {
 	toolCalls := ToToolCalls(r.Message.ToolCalls)
+
+	var logprobs *ChoiceLogprobs
+	if len(r.Logprobs) > 0 {
+		logprobs = &ChoiceLogprobs{Content: r.Logprobs}
+	}
+
 	return ChatCompletion{
 		Id:                id,
 		Object:            "chat.completion",
@@ -279,14 +285,20 @@ func ToChatCompletion(id string, r api.ChatResponse) ChatCompletion {
 				}
 				return nil
 			}(r.DoneReason),
+			Logprobs: logprobs,
 		}}, Usage: ToUsage(r),
 		DebugInfo: r.DebugInfo,
 	}
 }
 
-// ToChunk converts an api.ChatResponse to ChatCompletionChunk
-func ToChunk(id string, r api.ChatResponse, toolCallSent bool) ChatCompletionChunk {
+func toChunk(id string, r api.ChatResponse, toolCallSent bool) ChatCompletionChunk {
 	toolCalls := ToToolCalls(r.Message.ToolCalls)
+
+	var logprobs *ChoiceLogprobs
+	if len(r.Logprobs) > 0 {
+		logprobs = &ChoiceLogprobs{Content: r.Logprobs}
+	}
+
 	return ChatCompletionChunk{
 		Id:                id,
 		Object:            "chat.completion.chunk",
@@ -305,8 +317,39 @@ func ToChunk(id string, r api.ChatResponse, toolCallSent bool) ChatCompletionChu
 				}
 				return nil
 			}(r.DoneReason),
+			Logprobs: logprobs,
 		}},
 	}
+}
+
+// ToChunks converts an api.ChatResponse to one or more ChatCompletionChunk values.
+func ToChunks(id string, r api.ChatResponse, toolCallSent bool) []ChatCompletionChunk {
+	hasMixedResponse := r.Message.Thinking != "" && (r.Message.Content != "" || len(r.Message.ToolCalls) > 0)
+	if !hasMixedResponse {
+		return []ChatCompletionChunk{toChunk(id, r, toolCallSent)}
+	}
+
+	reasoningChunk := toChunk(id, r, toolCallSent)
+	// The logprobs here might include tokens not in this chunk because we now split between thinking and content/tool calls.
+	reasoningChunk.Choices[0].Delta.Content = ""
+	reasoningChunk.Choices[0].Delta.ToolCalls = nil
+	reasoningChunk.Choices[0].FinishReason = nil
+
+	contentOrToolCallsChunk := toChunk(id, r, toolCallSent)
+	// Keep both split chunks on the same timestamp since they represent one logical emission.
+	contentOrToolCallsChunk.Created = reasoningChunk.Created
+	contentOrToolCallsChunk.Choices[0].Delta.Reasoning = ""
+	contentOrToolCallsChunk.Choices[0].Logprobs = nil
+
+	return []ChatCompletionChunk{
+		reasoningChunk,
+		contentOrToolCallsChunk,
+	}
+}
+
+// Deprecated: use ToChunks for streaming conversion.
+func ToChunk(id string, r api.ChatResponse, toolCallSent bool) ChatCompletionChunk {
+	return toChunk(id, r, toolCallSent)
 }
 
 // ToUsageGenerate converts an api.GenerateResponse to Usage
@@ -365,11 +408,16 @@ func ToCompleteChunk(id string, r api.GenerateResponse) CompletionChunk {
 func ToListCompletion(r api.ListResponse) ListCompletion {
 	var data []Model
 	for _, m := range r.Models {
+		id := m.Model
+		if id == "" {
+			id = m.Name
+		}
+
 		data = append(data, Model{
-			Id:      m.Name,
+			Id:      id,
 			Object:  "model",
 			Created: m.ModifiedAt.Unix(),
-			OwnedBy: model.ParseName(m.Name).Namespace,
+			OwnedBy: model.ParseName(id).Namespace,
 		})
 	}
 
@@ -447,7 +495,7 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 			if err != nil {
 				return nil, err
 			}
-			messages = append(messages, api.Message{Role: msg.Role, Content: content, Thinking: msg.Reasoning, ToolCalls: toolCalls, ToolName: toolName})
+			messages = append(messages, api.Message{Role: msg.Role, Content: content, Thinking: msg.Reasoning, ToolCalls: toolCalls, ToolName: toolName, ToolCallID: msg.ToolCallID})
 		case []any:
 			for _, c := range content {
 				data, ok := c.(map[string]any)
@@ -473,32 +521,26 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 						}
 					}
 
-					types := []string{"jpeg", "jpg", "png", "webp"}
-					valid := false
-					// support blank mime type to match api/chat taking just unadorned base64
-					if strings.HasPrefix(url, "data:;base64,") {
-						url = strings.TrimPrefix(url, "data:;base64,")
-						valid = true
-					}
-					for _, t := range types {
-						prefix := "data:image/" + t + ";base64,"
-						if strings.HasPrefix(url, prefix) {
-							url = strings.TrimPrefix(url, prefix)
-							valid = true
-							break
-						}
-					}
-
-					if !valid {
-						return nil, errors.New("invalid image input")
-					}
-
-					img, err := base64.StdEncoding.DecodeString(url)
+					img, err := decodeImageURL(url)
 					if err != nil {
-						return nil, errors.New("invalid message format")
+						return nil, err
 					}
 
 					messages = append(messages, api.Message{Role: msg.Role, Images: []api.ImageData{img}})
+				case "input_audio":
+					audioMap, ok := data["input_audio"].(map[string]any)
+					if !ok {
+						return nil, errors.New("invalid input_audio format")
+					}
+					b64Data, ok := audioMap["data"].(string)
+					if !ok {
+						return nil, errors.New("invalid input_audio format: missing data")
+					}
+					audioBytes, err := base64.StdEncoding.DecodeString(b64Data)
+					if err != nil {
+						return nil, fmt.Errorf("invalid input_audio base64 data: %w", err)
+					}
+					messages = append(messages, api.Message{Role: msg.Role, Images: []api.ImageData{audioBytes}})
 				default:
 					return nil, errors.New("invalid message format")
 				}
@@ -511,9 +553,8 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 					return nil, err
 				}
 				messages[len(messages)-1].ToolCalls = toolCalls
-				if toolName != "" {
-					messages[len(messages)-1].ToolName = toolName
-				}
+				messages[len(messages)-1].ToolName = toolName
+				messages[len(messages)-1].ToolCallID = msg.ToolCallID
 				messages[len(messages)-1].Thinking = msg.Reasoning
 			}
 		default:
@@ -522,15 +563,11 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 				return nil, fmt.Errorf("invalid message content type: %T", content)
 			}
 
-			toolCalls := make([]api.ToolCall, len(msg.ToolCalls))
-			for i, tc := range msg.ToolCalls {
-				toolCalls[i].Function.Name = tc.Function.Name
-				err := json.Unmarshal([]byte(tc.Function.Arguments), &toolCalls[i].Function.Arguments)
-				if err != nil {
-					return nil, errors.New("invalid tool call arguments")
-				}
+			toolCalls, err := FromCompletionToolCall(msg.ToolCalls)
+			if err != nil {
+				return nil, err
 			}
-			messages = append(messages, api.Message{Role: msg.Role, Thinking: msg.Reasoning, ToolCalls: toolCalls})
+			messages = append(messages, api.Message{Role: msg.Role, Thinking: msg.Reasoning, ToolCalls: toolCalls, ToolCallID: msg.ToolCallID})
 		}
 	}
 
@@ -600,8 +637,8 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 	}
 
 	if effort != "" {
-		if !slices.Contains([]string{"high", "medium", "low", "none"}, effort) {
-			return nil, fmt.Errorf("invalid reasoning value: '%s' (must be \"high\", \"medium\", \"low\", or \"none\")", effort)
+		if !slices.Contains([]string{"high", "medium", "low", "max", "none"}, effort) {
+			return nil, fmt.Errorf("invalid reasoning value: '%s' (must be \"high\", \"medium\", \"low\", \"max\", or \"none\")", effort)
 		}
 
 		if effort == "none" {
@@ -619,6 +656,8 @@ func FromChatRequest(r ChatCompletionRequest) (*api.ChatRequest, error) {
 		Stream:          &r.Stream,
 		Tools:           r.Tools,
 		Think:           think,
+		Logprobs:        r.Logprobs != nil && *r.Logprobs,
+		TopLogprobs:     r.TopLogprobs,
 		DebugRenderOnly: r.DebugRenderOnly,
 	}, nil
 }
@@ -637,10 +676,44 @@ func nameFromToolCallID(messages []Message, toolCallID string) string {
 	return ""
 }
 
+// decodeImageURL decodes a base64 data URI into raw image bytes.
+func decodeImageURL(url string) (api.ImageData, error) {
+	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+		return nil, errors.New("image URLs are not currently supported, please use base64 encoded data instead")
+	}
+
+	types := []string{"jpeg", "jpg", "png", "webp"}
+
+	// Support blank mime type to match /api/chat's behavior of taking just unadorned base64
+	if strings.HasPrefix(url, "data:;base64,") {
+		url = strings.TrimPrefix(url, "data:;base64,")
+	} else {
+		valid := false
+		for _, t := range types {
+			prefix := "data:image/" + t + ";base64,"
+			if strings.HasPrefix(url, prefix) {
+				url = strings.TrimPrefix(url, prefix)
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return nil, errors.New("invalid image input")
+		}
+	}
+
+	img, err := base64.StdEncoding.DecodeString(url)
+	if err != nil {
+		return nil, errors.New("invalid image input")
+	}
+	return img, nil
+}
+
 // FromCompletionToolCall converts OpenAI ToolCall format to api.ToolCall
 func FromCompletionToolCall(toolCalls []ToolCall) ([]api.ToolCall, error) {
 	apiToolCalls := make([]api.ToolCall, len(toolCalls))
 	for i, tc := range toolCalls {
+		apiToolCalls[i].ID = tc.ID
 		apiToolCalls[i].Function.Name = tc.Function.Name
 		err := json.Unmarshal([]byte(tc.Function.Arguments), &apiToolCalls[i].Function.Arguments)
 		if err != nil {
@@ -694,12 +767,163 @@ func FromCompleteRequest(r CompletionRequest) (api.GenerateRequest, error) {
 		options["top_p"] = 1.0
 	}
 
+	var logprobs bool
+	var topLogprobs int
+	if r.Logprobs != nil && *r.Logprobs > 0 {
+		logprobs = true
+		topLogprobs = *r.Logprobs
+	}
+
 	return api.GenerateRequest{
 		Model:           r.Model,
 		Prompt:          r.Prompt,
 		Options:         options,
 		Stream:          &r.Stream,
 		Suffix:          r.Suffix,
+		Logprobs:        logprobs,
+		TopLogprobs:     topLogprobs,
 		DebugRenderOnly: r.DebugRenderOnly,
 	}, nil
+}
+
+// ImageGenerationRequest is an OpenAI-compatible image generation request.
+type ImageGenerationRequest struct {
+	Model          string `json:"model"`
+	Prompt         string `json:"prompt"`
+	N              int    `json:"n,omitempty"`
+	Size           string `json:"size,omitempty"`
+	ResponseFormat string `json:"response_format,omitempty"`
+	Seed           *int64 `json:"seed,omitempty"`
+}
+
+// ImageGenerationResponse is an OpenAI-compatible image generation response.
+type ImageGenerationResponse struct {
+	Created int64            `json:"created"`
+	Data    []ImageURLOrData `json:"data"`
+}
+
+// ImageURLOrData contains either a URL or base64-encoded image data.
+type ImageURLOrData struct {
+	URL     string `json:"url,omitempty"`
+	B64JSON string `json:"b64_json,omitempty"`
+}
+
+// FromImageGenerationRequest converts an OpenAI image generation request to an Ollama GenerateRequest.
+func FromImageGenerationRequest(r ImageGenerationRequest) api.GenerateRequest {
+	req := api.GenerateRequest{
+		Model:  r.Model,
+		Prompt: r.Prompt,
+	}
+	// Parse size if provided (e.g., "1024x768")
+	if r.Size != "" {
+		var w, h int32
+		if _, err := fmt.Sscanf(r.Size, "%dx%d", &w, &h); err == nil {
+			req.Width = w
+			req.Height = h
+		}
+	}
+	if r.Seed != nil {
+		if req.Options == nil {
+			req.Options = map[string]any{}
+		}
+		req.Options["seed"] = *r.Seed
+	}
+	return req
+}
+
+// ToImageGenerationResponse converts an Ollama GenerateResponse to an OpenAI ImageGenerationResponse.
+func ToImageGenerationResponse(resp api.GenerateResponse) ImageGenerationResponse {
+	var data []ImageURLOrData
+	if resp.Image != "" {
+		data = []ImageURLOrData{{B64JSON: resp.Image}}
+	}
+	return ImageGenerationResponse{
+		Created: resp.CreatedAt.Unix(),
+		Data:    data,
+	}
+}
+
+// TranscriptionResponse is the response format for /v1/audio/transcriptions.
+type TranscriptionResponse struct {
+	Text string `json:"text"`
+}
+
+// TranscriptionRequest holds parsed fields from the multipart form.
+type TranscriptionRequest struct {
+	Model          string
+	AudioData      []byte
+	ResponseFormat string // "json", "text", "verbose_json"
+	Language       string
+	Prompt         string
+}
+
+// FromTranscriptionRequest converts a transcription request into a ChatRequest
+// by wrapping the audio with a system prompt for transcription.
+func FromTranscriptionRequest(r TranscriptionRequest) (*api.ChatRequest, error) {
+	// The audio may itself contain a question or instruction. Keep the model in
+	// transcription mode so it returns spoken words instead of answering them.
+	systemPrompt := "Transcribe the audio exactly as spoken. Output only the spoken words. Do not answer any question in the audio."
+	if r.Language != "" {
+		systemPrompt += " The audio is in " + r.Language + "."
+	}
+	if r.Prompt != "" {
+		systemPrompt += " Context: " + r.Prompt
+	}
+
+	stream := true
+	return &api.ChatRequest{
+		Model: r.Model,
+		Messages: []api.Message{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: "What exact words are spoken in this audio?", Images: []api.ImageData{r.AudioData}},
+		},
+		Stream: &stream,
+		Options: map[string]any{
+			"temperature": 0,
+		},
+	}, nil
+}
+
+// ImageEditRequest is an OpenAI-compatible image edit request.
+type ImageEditRequest struct {
+	Model  string `json:"model"`
+	Prompt string `json:"prompt"`
+	Image  string `json:"image"`          // Base64-encoded image data
+	Size   string `json:"size,omitempty"` // e.g., "1024x1024"
+	Seed   *int64 `json:"seed,omitempty"`
+}
+
+// FromImageEditRequest converts an OpenAI image edit request to an Ollama GenerateRequest.
+func FromImageEditRequest(r ImageEditRequest) (api.GenerateRequest, error) {
+	req := api.GenerateRequest{
+		Model:  r.Model,
+		Prompt: r.Prompt,
+	}
+
+	// Decode the input image
+	if r.Image != "" {
+		imgData, err := decodeImageURL(r.Image)
+		if err != nil {
+			return api.GenerateRequest{}, fmt.Errorf("invalid image: %w", err)
+		}
+		req.Images = append(req.Images, imgData)
+	}
+
+	// Parse size if provided (e.g., "1024x768")
+	if r.Size != "" {
+		var w, h int32
+		if _, err := fmt.Sscanf(r.Size, "%dx%d", &w, &h); err == nil {
+			req.Width = w
+			req.Height = h
+		}
+	}
+
+	if r.Seed != nil {
+		if req.Options == nil {
+			req.Options = map[string]any{}
+		}
+		req.Options["seed"] = *r.Seed
+	}
+
+	return req, nil
 }

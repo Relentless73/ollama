@@ -388,9 +388,9 @@ func NewFunctionNameMap() *FunctionNameMap {
 	}
 }
 
-// Init initializes the handler with tools and optional last message
+// Init initializes the handler with tools, optional last message, and think value
 // Implements the Parser interface
-func (h *HarmonyMessageHandler) Init(tools []api.Tool, lastMessage *api.Message) []api.Tool {
+func (h *HarmonyMessageHandler) Init(tools []api.Tool, lastMessage *api.Message, thinkValue *api.ThinkValue) []api.Tool {
 	// Initialize the harmony parser
 	if h.HarmonyParser == nil {
 		h.HarmonyParser = &HarmonyParser{
@@ -459,6 +459,18 @@ func (h *HarmonyMessageHandler) HasToolSupport() bool {
 // HasThinkingSupport implements the Parser interface
 func (h *HarmonyMessageHandler) HasThinkingSupport() bool {
 	return true
+}
+
+func (h *HarmonyMessageHandler) PreservedTokens() []string {
+	// <|call|> is an EOG marker for tool calls. Preserve structural tokens
+	// used by the parser, but let llama-server stop on the call terminator.
+	return []string{
+		"<|start|>",
+		"<|end|>",
+		"<|message|>",
+		"<|channel|>",
+		"<|constrain|>",
+	}
 }
 
 func (m *FunctionNameMap) ConvertAndAdd(userFunctionName string) string {
